@@ -7,3 +7,4 @@ All notable changes to this project will be documented in this file.
 - Initial repository scaffolding
 - Added API design document
 - Added package metadata and build configuration
+- Implemented Tidepool client API surface
