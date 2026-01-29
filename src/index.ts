@@ -36,6 +36,16 @@ export interface NamespaceInfo {
   namespace: string;
   approxCount: number;
   dimensions: number;
+  pendingCompaction?: boolean | null;
+}
+
+export interface NamespaceStatus {
+  lastRun: Date | null;
+  walFiles: number;
+  walEntries: number;
+  segments: number;
+  totalVecs: number;
+  dimensions: number;
 }
 
 export interface IngestStatus {
@@ -51,6 +61,7 @@ export interface TidepoolConfig {
   queryUrl?: string;
   ingestUrl?: string;
   timeout?: number;
+  defaultNamespace?: string;
   namespace?: string;
 }
 
@@ -219,6 +230,10 @@ function ensurePositiveInt(value: number, fieldName: string): void {
 
 function normalizeNamespaceInfo(data: NamespaceInfo | Record<string, unknown>): NamespaceInfo {
   const record = data as Record<string, unknown>;
+  const pendingRaw =
+    record.pendingCompaction ?? record.pending_compaction ?? record.pending;
+  const pending =
+    typeof pendingRaw === "boolean" ? pendingRaw : pendingRaw === null ? null : undefined;
   return {
     namespace: ensureNonEmptyString(
       (record.namespace ?? record.ns) as unknown,
@@ -226,10 +241,53 @@ function normalizeNamespaceInfo(data: NamespaceInfo | Record<string, unknown>): 
     ),
     approxCount: Number(record.approxCount ?? record.approx_count ?? record.count ?? 0),
     dimensions: Number(record.dimensions ?? record.dims ?? record.dimension ?? 0),
+    pendingCompaction: pending,
   };
 }
 
+function normalizeNamespaceList(data: unknown): NamespaceInfo[] {
+  if (Array.isArray(data)) {
+    return data.map((item) =>
+      typeof item === "string" ? normalizeNamespaceInfo({ namespace: item }) : normalizeNamespaceInfo(item as Record<string, unknown>)
+    );
+  }
+  if (data && typeof data === "object") {
+    const record = data as Record<string, unknown>;
+    const list =
+      (record.namespaces as unknown[]) ??
+      (record.namespace_list as unknown[]) ??
+      (record.namespaceList as unknown[]);
+    if (Array.isArray(list)) {
+      return list.map((item) =>
+        typeof item === "string"
+          ? normalizeNamespaceInfo({ namespace: item })
+          : normalizeNamespaceInfo(item as Record<string, unknown>)
+      );
+    }
+  }
+  throw new TidepoolError("Unexpected namespaces response shape");
+}
+
 function normalizeIngestStatus(data: IngestStatus | Record<string, unknown>): IngestStatus {
+  const record = data as Record<string, unknown>;
+  const lastRunRaw = record.lastRun ?? record.last_run ?? null;
+  const parsed =
+    lastRunRaw === null || lastRunRaw === undefined
+      ? null
+      : new Date(lastRunRaw as string);
+  return {
+    lastRun: parsed && !Number.isNaN(parsed.getTime()) ? parsed : null,
+    walFiles: Number(record.walFiles ?? record.wal_files ?? 0),
+    walEntries: Number(record.walEntries ?? record.wal_entries ?? 0),
+    segments: Number(record.segments ?? 0),
+    totalVecs: Number(record.totalVecs ?? record.total_vecs ?? 0),
+    dimensions: Number(record.dimensions ?? record.dims ?? 0),
+  };
+}
+
+function normalizeNamespaceStatus(
+  data: NamespaceStatus | Record<string, unknown>
+): NamespaceStatus {
   const record = data as Record<string, unknown>;
   const lastRunRaw = record.lastRun ?? record.last_run ?? null;
   const parsed =
@@ -263,24 +321,58 @@ function normalizeVectorResults(
   return [];
 }
 
+function normalizeQueryResponse(
+  data: QueryResponse | VectorResult[] | Record<string, unknown>,
+  fallbackNamespace: string
+): QueryResponse {
+  if (Array.isArray(data)) {
+    return {
+      namespace: fallbackNamespace,
+      results: normalizeVectorResults(data),
+    };
+  }
+  if (data && typeof data === "object") {
+    const record = data as Record<string, unknown>;
+    const rawNamespace = record.namespace ?? record.ns;
+    const namespace =
+      typeof rawNamespace === "string" && rawNamespace.trim().length > 0
+        ? rawNamespace
+        : fallbackNamespace;
+    if (Array.isArray(record.results)) {
+      return {
+        namespace,
+        results: normalizeVectorResults(record.results as VectorResult[]),
+      };
+    }
+    if (Array.isArray(record.vectors)) {
+      return {
+        namespace,
+        results: normalizeVectorResults(record.vectors as VectorResult[]),
+      };
+    }
+  }
+  throw new TidepoolError("Unexpected query response shape");
+}
+
 export class TidepoolClient {
   private queryUrl: string;
   private ingestUrl: string;
   private timeout: number;
-  private namespace: string;
+  private defaultNamespace: string;
 
   constructor(config: TidepoolConfig = {}) {
     this.queryUrl = config.queryUrl ?? DEFAULT_QUERY_URL;
     this.ingestUrl = config.ingestUrl ?? DEFAULT_INGEST_URL;
     this.timeout = config.timeout ?? DEFAULT_TIMEOUT;
-    this.namespace = config.namespace ?? DEFAULT_NAMESPACE;
+    this.defaultNamespace =
+      config.defaultNamespace ?? config.namespace ?? DEFAULT_NAMESPACE;
 
     ensureNonEmptyString(this.queryUrl, "queryUrl");
     ensureNonEmptyString(this.ingestUrl, "ingestUrl");
     if (!Number.isFinite(this.timeout) || this.timeout <= 0) {
       throw new ValidationError("timeout must be a positive number");
     }
-    this.namespace = normalizeNamespace(this.namespace);
+    this.defaultNamespace = normalizeNamespace(this.defaultNamespace);
   }
 
   async health(service: "query" | "ingest" = "query"): Promise<{ service: string; status: string }> {
@@ -290,9 +382,13 @@ export class TidepoolClient {
     });
   }
 
+  private resolveNamespace(namespace?: string): string {
+    return normalizeNamespace(namespace ?? this.defaultNamespace);
+  }
+
   async upsert(vectors: Document[], options: UpsertOptions = {}): Promise<void> {
     validateDocuments(vectors);
-    const namespace = normalizeNamespace(options.namespace ?? this.namespace);
+    const namespace = this.resolveNamespace(options.namespace);
     const body: Record<string, unknown> = {
       vectors: vectors.map((doc) => ({
         id: doc.id,
@@ -309,9 +405,9 @@ export class TidepoolClient {
     });
   }
 
-  async query(vector: Vector, options: QueryOptions = {}): Promise<VectorResult[]> {
+  async query(vector: Vector, options: QueryOptions = {}): Promise<QueryResponse> {
     validateVector(vector);
-    const namespace = normalizeNamespace(options.namespace ?? this.namespace);
+    const namespace = this.resolveNamespace(options.namespace);
     if (options.topK !== undefined) {
       ensurePositiveInt(options.topK, "topK");
     }
@@ -347,25 +443,12 @@ export class TidepoolClient {
         body: toJsonBody(body),
       }
     );
-
-    if (Array.isArray(data)) {
-      return normalizeVectorResults(data);
-    }
-    if (data && Array.isArray(data.results)) {
-      return normalizeVectorResults(data.results);
-    }
-    if (data && typeof data === "object") {
-      const maybeVectors = (data as unknown as Record<string, unknown>).vectors;
-      if (Array.isArray(maybeVectors)) {
-        return normalizeVectorResults(maybeVectors as VectorResult[]);
-      }
-    }
-    throw new TidepoolError("Unexpected query response shape");
+    return normalizeQueryResponse(data, namespace);
   }
 
   async delete(ids: string[], options: DeleteOptions = {}): Promise<void> {
     validateIds(ids);
-    const namespace = normalizeNamespace(options.namespace ?? this.namespace);
+    const namespace = this.resolveNamespace(options.namespace);
     await this.request<void>(this.ingestUrl, `/v1/vectors/${namespace}`, {
       method: "DELETE",
       body: toJsonBody({ ids }),
@@ -373,7 +456,7 @@ export class TidepoolClient {
   }
 
   async getNamespace(namespace?: string): Promise<NamespaceInfo> {
-    const resolved = normalizeNamespace(namespace ?? this.namespace);
+    const resolved = this.resolveNamespace(namespace);
     const data = await this.request<NamespaceInfo | Record<string, unknown>>(
       this.queryUrl,
       `/v1/namespaces/${resolved}`,
@@ -382,26 +465,21 @@ export class TidepoolClient {
     return normalizeNamespaceInfo(data);
   }
 
-  async listNamespaces(): Promise<string[]> {
-    const data = await this.request<string[] | { namespaces: string[] }>(
-      this.queryUrl,
-      "/v1/namespaces",
+  async getNamespaceStatus(namespace?: string): Promise<NamespaceStatus> {
+    const resolved = this.resolveNamespace(namespace);
+    const data = await this.request<NamespaceStatus | Record<string, unknown>>(
+      this.ingestUrl,
+      `/v1/namespaces/${resolved}/status`,
       { method: "GET" }
     );
-    if (Array.isArray(data)) {
-      return data.map((name) => String(name));
-    }
-    if (data && Array.isArray(data.namespaces)) {
-      return data.namespaces.map((name) => String(name));
-    }
-    if (data && typeof data === "object") {
-      const namespaceList = (data as unknown as { namespace_list?: string[] })
-        .namespace_list;
-      if (Array.isArray(namespaceList)) {
-        return namespaceList.map((name) => String(name));
-      }
-    }
-    throw new TidepoolError("Unexpected namespaces response shape");
+    return normalizeNamespaceStatus(data);
+  }
+
+  async listNamespaces(): Promise<NamespaceInfo[]> {
+    const data = await this.request<unknown>(this.queryUrl, "/v1/namespaces", {
+      method: "GET",
+    });
+    return normalizeNamespaceList(data);
   }
 
   async status(): Promise<IngestStatus> {
@@ -413,8 +491,11 @@ export class TidepoolClient {
     return normalizeIngestStatus(data);
   }
 
-  async compact(): Promise<void> {
-    await this.request<void>(this.ingestUrl, "/compact", { method: "POST" });
+  async compact(namespace?: string): Promise<void> {
+    const resolved = this.resolveNamespace(namespace);
+    await this.request<void>(this.ingestUrl, `/v1/namespaces/${resolved}/compact`, {
+      method: "POST",
+    });
   }
 
   private async request<T>(

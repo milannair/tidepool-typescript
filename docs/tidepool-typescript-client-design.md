@@ -108,6 +108,7 @@ interface NamespaceInfo {
   namespace: string;
   approxCount: number;
   dimensions: number;
+  pendingCompaction?: boolean | null;
 }
 ```
 
@@ -291,7 +292,7 @@ console.log(`Vectors: ${info.approxCount}, Dimensions: ${info.dimensions}`);
 ### List Namespaces
 
 ```typescript
-async listNamespaces(): Promise<string[]>;
+async listNamespaces(): Promise<NamespaceInfo[]>;
 ```
 
 **HTTP:** `GET /v1/namespaces`
@@ -299,7 +300,7 @@ async listNamespaces(): Promise<string[]>;
 **Example:**
 ```typescript
 const namespaces = await client.listNamespaces();
-console.log(namespaces); // ["default", "embeddings"]
+console.log(namespaces); // [{ namespace: "default", ... }, { namespace: "embeddings", ... }]
 ```
 
 ---

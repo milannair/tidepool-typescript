@@ -22,7 +22,7 @@
     "build": "tsc -p tsconfig.json",
     "clean": "rm -rf dist",
     "prepublishOnly": "npm run clean && npm run build",
-    "test": "echo \"No tests yet\""
+    "test": "npm run build && node --test tests/*.test.mjs"
   },
   "engines": {
     "node": ">=18"

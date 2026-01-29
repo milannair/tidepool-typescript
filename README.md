@@ -5,6 +5,7 @@ TypeScript client library and API contract for the Tidepool vector database serv
 ## Contents
 
 - API design document: `docs/tidepool-typescript-client-design.md`
+- Dynamic namespaces guide: `docs/TYPESCRIPT_CLIENT.md`
 - Release checklist: `RELEASING.md`
 
 ## Installation
@@ -23,10 +24,11 @@ import { TidepoolClient } from "tidepool-client";
 const client = new TidepoolClient({
   queryUrl: "https://query.example.com",
   ingestUrl: "https://ingest.example.com",
+  defaultNamespace: "default",
 });
 
-const results = await client.query([0.1, 0.2, 0.3, 0.4], { topK: 5 });
-console.log(results);
+const response = await client.query([0.1, 0.2, 0.3, 0.4], { topK: 5 });
+console.log(response.namespace, response.results);
 ```
 
 ## Development
