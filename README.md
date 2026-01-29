@@ -27,7 +27,13 @@ const client = new TidepoolClient({
   defaultNamespace: "default",
 });
 
-const response = await client.query([0.1, 0.2, 0.3, 0.4], { topK: 5 });
+const response = await client.query({
+  vector: [0.1, 0.2, 0.3, 0.4],
+  text: "neural networks",
+  mode: "hybrid",
+  topK: 5,
+  alpha: 0.7,
+});
 console.log(response.namespace, response.results);
 ```
 

@@ -22,7 +22,23 @@ const client = new TidepoolClient({
 
 ```typescript
 client.upsert(vectors, { namespace, distanceMetric });
-client.query(vector, { topK, namespace, distanceMetric, includeVectors, filters, efSearch, nprobe });
+client.query({
+  vector,
+  text,
+  mode,       // "vector" | "text" | "hybrid"
+  alpha,      // Blend weight for hybrid
+  fusion,     // "blend" | "rrf"
+  rrfK,
+  topK,
+  namespace,
+  distanceMetric,
+  includeVectors,
+  filters,
+  efSearch,
+  nprobe,
+});
+// Backward-compatible vector-first overload:
+client.query(vector, { text, mode, alpha, fusion, rrfK, topK, namespace, distanceMetric, includeVectors, filters, efSearch, nprobe });
 client.delete(ids, { namespace });
 
 client.getNamespace(namespace?);
@@ -34,6 +50,10 @@ client.compact(namespace?);
 client.status(); // Ingest service status (global)
 client.health("query" | "ingest");
 ```
+
+## Full-Text & Hybrid Search
+
+Include `text` on documents to enable BM25 search. For queries, set `mode` to `"text"` for full-text only or `"hybrid"` to fuse vector and text results. Hybrid queries support `alpha` (blend weight) and `fusion: "rrf"` when you want reciprocal-rank fusion instead of score blending.
 
 ## Response Models
 
@@ -50,6 +70,13 @@ interface NamespaceStatus {
 interface QueryResponse {
   results: VectorResult[];
   namespace: string;
+}
+
+interface VectorResult {
+  id: string;
+  score: number;
+  vector?: number[];
+  attributes?: Record<string, AttrValue>;
 }
 
 interface NamespaceInfo {
@@ -79,7 +106,14 @@ function indexTenantData(tenantId: string, documents: Array<Record<string, unkno
 
 async function searchTenant(tenantId: string, query: string, topK = 10) {
   const queryVec = embed(query);
-  return client.query(queryVec, { topK, namespace: `tenant_${tenantId}` });
+  return client.query({
+    vector: queryVec,
+    text: query,
+    mode: "hybrid",
+    alpha: 0.7,
+    topK,
+    namespace: `tenant_${tenantId}`,
+  });
 }
 ```
 

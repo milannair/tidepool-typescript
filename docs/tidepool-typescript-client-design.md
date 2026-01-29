@@ -59,24 +59,25 @@ type AttrValue =
 
 ### Document
 
-A document represents a single vector with its ID and optional attributes.
+A document represents a single vector with its ID, optional text, and optional attributes.
 
 ```typescript
 interface Document {
   id: string;                              // Unique identifier (required)
   vector: Vector;                          // Vector data (required for upsert)
+  text?: string;                           // Full-text content for BM25 (optional)
   attributes?: Record<string, AttrValue>;  // Metadata (optional)
 }
 ```
 
 ### VectorResult
 
-A query result includes the document data plus distance score.
+A query result includes the document data plus a relevance score.
 
 ```typescript
 interface VectorResult {
   id: string;                              // Document ID
-  dist: number;                            // Distance from query vector
+  score: number;                           // Similarity or fused score
   vector?: Vector;                         // Only if includeVectors=true
   attributes?: Record<string, AttrValue>;  // Document attributes
 }
@@ -198,30 +199,44 @@ await client.upsert([
 
 ---
 
-### Query Vectors
+### Query (Vector, Text, Hybrid)
 
-Search for similar vectors using approximate nearest neighbor search.
+Search by vector similarity, BM25 full-text, or a hybrid of both.
 
 ```typescript
-interface QueryOptions {
-  topK?: number;              // Default: 10
+type QueryMode = "vector" | "text" | "hybrid";
+type FusionMode = "blend" | "rrf";
+
+interface QueryRequest {
+  vector?: Vector;
+  text?: string;
+  mode?: QueryMode;
+  alpha?: number;                 // Blend weight for hybrid
+  fusion?: FusionMode;            // "blend" (default) or "rrf"
+  rrfK?: number;                  // Reciprocal rank fusion constant
+  topK?: number;                  // Default: 10
   namespace?: string;
   distanceMetric?: DistanceMetric;
-  includeVectors?: boolean;   // Default: false
+  includeVectors?: boolean;       // Default: false
   filters?: Record<string, AttrValue>;
-  efSearch?: number;          // HNSW beam width
-  nprobe?: number;            // IVF partitions to search
+  efSearch?: number;              // HNSW beam width
+  nprobe?: number;                // IVF partitions to search
 }
 
-async query(vector: Vector, options?: QueryOptions): Promise<VectorResult[]>;
+async query(request: QueryRequest): Promise<QueryResponse>;
+async query(vector: Vector, options?: QueryRequest): Promise<QueryResponse>;
 ```
 
 **HTTP:** `POST /v1/vectors/{namespace}`
 
-**Request Body:**
+**Request Body (hybrid example):**
 ```json
 {
   "vector": [0.1, 0.2, 0.3],
+  "text": "neural networks",
+  "mode": "hybrid",
+  "alpha": 0.7,
+  "fusion": "blend",
   "top_k": 10,
   "ef_search": 100,
   "nprobe": 10,
@@ -233,13 +248,16 @@ async query(vector: Vector, options?: QueryOptions): Promise<VectorResult[]>;
 
 **Example:**
 ```typescript
-const results = await client.query([0.1, 0.2, 0.3, 0.4], {
+const response = await client.query({
+  vector: [0.1, 0.2, 0.3, 0.4],
+  text: "machine learning",
+  mode: "hybrid",
   topK: 5,
-  filters: { category: "news" },
+  alpha: 0.7,
 });
 
-for (const result of results) {
-  console.log(`${result.id}: ${result.dist.toFixed(4)}`);
+for (const result of response.results) {
+  console.log(`${result.id}: ${result.score.toFixed(4)}`);
 }
 ```
 
@@ -414,20 +432,21 @@ await client.upsert(documents);
 await client.compact();
 
 // Query
-const results = await client.query([0.1, 0.2, 0.3, 0.4], { topK: 5 });
-console.log(results);
+const response = await client.query([0.1, 0.2, 0.3, 0.4], { topK: 5 });
+console.log(response.results);
 ```
 
 ### With Filtering
 
 ```typescript
-const results = await client.query([0.1, 0.2, 0.3, 0.4], {
+const response = await client.query([0.1, 0.2, 0.3, 0.4], {
   topK: 10,
   filters: {
     category: "news",
     published: true,
   },
 });
+const results = response.results;
 ```
 
 ### Batch Upload with Progress
@@ -451,7 +470,8 @@ await client.compact();
 import { TidepoolError, NotFoundError, ServiceUnavailableError } from "tidepool-client";
 
 try {
-  const results = await client.query([0.1, 0.2, 0.3]);
+  const response = await client.query([0.1, 0.2, 0.3]);
+  const results = response.results;
 } catch (error) {
   if (error instanceof NotFoundError) {
     console.error("Namespace not found");
@@ -486,7 +506,7 @@ function useVectorSearch(queryVector: number[] | null, topK = 10) {
 
     client
       .query(queryVector, { topK })
-      .then(setResults)
+      .then((response) => setResults(response.results))
       .catch(setError)
       .finally(() => setLoading(false));
   }, [queryVector, topK]);

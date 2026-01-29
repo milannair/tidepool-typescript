@@ -52,14 +52,14 @@ beforeEach(() => {
       });
     }
 
-    if (url.includes("/v1/vectors/") && method === "POST" && body?.vector) {
+    if (url.includes("/v1/vectors/") && method === "POST") {
       const namespace = url.split("/v1/vectors/")[1];
       if (responseMode === "array") {
-        return jsonResponse([{ id: "a", dist: 0.1 }]);
+        return jsonResponse([{ id: "a", score: 0.1 }]);
       }
       return jsonResponse({
         namespace,
-        results: [{ id: "a", dist: 0.1 }],
+        results: [{ id: "a", score: 0.1 }],
       });
     }
 
@@ -125,6 +125,18 @@ test("cross-namespace isolation uses distinct endpoints", async () => {
   assert.equal(b.namespace, "tenant_b");
   assert.ok(calls.some((call) => call.url.includes("/v1/vectors/tenant_a")));
   assert.ok(calls.some((call) => call.url.includes("/v1/vectors/tenant_b")));
+});
+
+test("supports text-only queries via request object", async () => {
+  const client = new TidepoolClient({ defaultNamespace: "default" });
+
+  await client.query({ text: "machine learning", mode: "text", namespace: "documents" });
+
+  const lastCall = calls[calls.length - 1];
+  assert.ok(lastCall.url.includes("/v1/vectors/documents"));
+  assert.equal(lastCall.body.mode, "text");
+  assert.equal(lastCall.body.text, "machine learning");
+  assert.equal(lastCall.body.vector, undefined);
 });
 
 test("listNamespaces returns namespace info", async () => {

@@ -11,15 +11,20 @@ export type AttrValue =
 export interface Document {
   id: string;
   vector: Vector;
+  text?: string;
   attributes?: Record<string, AttrValue>;
 }
 
 export interface VectorResult {
   id: string;
-  dist: number;
+  score: number;
   vector?: Vector;
   attributes?: Record<string, AttrValue>;
 }
+
+export type QueryMode = "vector" | "text" | "hybrid";
+
+export type FusionMode = "blend" | "rrf";
 
 export enum DistanceMetric {
   Cosine = "cosine_distance",
@@ -70,14 +75,27 @@ export interface UpsertOptions {
   distanceMetric?: DistanceMetric;
 }
 
-export interface QueryOptions {
+export interface BaseQueryOptions {
+  text?: string;
+  mode?: QueryMode;
+  alpha?: number;
+  fusion?: FusionMode;
+  rrfK?: number;
   topK?: number;
-  namespace?: string;
   distanceMetric?: DistanceMetric;
   includeVectors?: boolean;
   filters?: Record<string, AttrValue>;
   efSearch?: number;
   nprobe?: number;
+}
+
+export interface QueryOptions extends BaseQueryOptions {
+  namespace?: string;
+}
+
+export interface QueryRequest extends BaseQueryOptions {
+  vector?: Vector;
+  namespace?: string;
 }
 
 export interface DeleteOptions {
@@ -168,6 +186,62 @@ function ensureNonEmptyString(value: unknown, fieldName: string): string {
   return value.trim();
 }
 
+function ensureOptionalString(value: unknown, fieldName: string): string | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value !== "string") {
+    throw new ValidationError(`${fieldName} must be a string`);
+  }
+  return value;
+}
+
+function normalizeQueryText(value: unknown): string | undefined {
+  const text = ensureOptionalString(value, "text");
+  if (text === undefined) {
+    return undefined;
+  }
+  const trimmed = text.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function normalizeQueryMode(
+  mode: unknown,
+  hasVector: boolean,
+  hasText: boolean
+): QueryMode {
+  if (mode !== undefined && mode !== null) {
+    if (mode === "vector" || mode === "text" || mode === "hybrid") {
+      return mode;
+    }
+    throw new ValidationError("mode must be one of: vector, text, hybrid");
+  }
+  if (hasVector && hasText) {
+    return "hybrid";
+  }
+  if (hasText) {
+    return "text";
+  }
+  return "vector";
+}
+
+function normalizeFusionMode(value: unknown): FusionMode | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (value === "blend" || value === "rrf") {
+    return value;
+  }
+  throw new ValidationError("fusion must be one of: blend, rrf");
+}
+
+function normalizeAlpha(value: number): number {
+  if (!Number.isFinite(value)) {
+    throw new ValidationError("alpha must be a finite number");
+  }
+  return Math.min(1, Math.max(0, value));
+}
+
 function toJsonBody(body: unknown): string {
   return JSON.stringify(body);
 }
@@ -196,6 +270,9 @@ function validateDocuments(documents: Document[]): void {
   for (const doc of documents) {
     ensureNonEmptyString(doc?.id, "id");
     validateVector(doc?.vector, expectedDims);
+    if (doc?.text !== undefined) {
+      ensureOptionalString(doc.text, "text");
+    }
   }
 }
 
@@ -310,9 +387,11 @@ function normalizeVectorResults(
   if (Array.isArray(data)) {
     return data.map((result) => ({
       id: String(result.id),
-      dist: Number(
-        (result as VectorResult).dist ??
-          (result as unknown as Record<string, unknown>).distance
+      score: Number(
+        (result as unknown as Record<string, unknown>).score ??
+          (result as unknown as Record<string, unknown>).dist ??
+          (result as unknown as Record<string, unknown>).distance ??
+          0
       ),
       vector: result.vector,
       attributes: result.attributes,
@@ -393,6 +472,7 @@ export class TidepoolClient {
       vectors: vectors.map((doc) => ({
         id: doc.id,
         vector: doc.vector,
+        text: doc.text,
         attributes: doc.attributes,
       })),
     };
@@ -405,34 +485,84 @@ export class TidepoolClient {
     });
   }
 
-  async query(vector: Vector, options: QueryOptions = {}): Promise<QueryResponse> {
-    validateVector(vector);
-    const namespace = this.resolveNamespace(options.namespace);
-    if (options.topK !== undefined) {
-      ensurePositiveInt(options.topK, "topK");
+  async query(vector: Vector, options?: QueryOptions): Promise<QueryResponse>;
+  async query(request: QueryRequest): Promise<QueryResponse>;
+  async query(
+    input: Vector | QueryRequest,
+    options: QueryOptions = {}
+  ): Promise<QueryResponse> {
+    const request: QueryRequest = Array.isArray(input)
+      ? { ...options, vector: input }
+      : input;
+    const namespace = this.resolveNamespace(request.namespace);
+
+    if (request.topK !== undefined) {
+      ensurePositiveInt(request.topK, "topK");
     }
-    if (options.efSearch !== undefined) {
-      ensurePositiveInt(options.efSearch, "efSearch");
+    if (request.efSearch !== undefined) {
+      ensurePositiveInt(request.efSearch, "efSearch");
     }
-    if (options.nprobe !== undefined) {
-      ensurePositiveInt(options.nprobe, "nprobe");
+    if (request.nprobe !== undefined) {
+      ensurePositiveInt(request.nprobe, "nprobe");
     }
+    if (request.rrfK !== undefined) {
+      ensurePositiveInt(request.rrfK, "rrfK");
+    }
+
+    const text = normalizeQueryText(request.text);
+    const hasText = text !== undefined;
+    let hasVector = false;
+    if (request.vector !== undefined) {
+      validateVector(request.vector);
+      hasVector = true;
+    }
+
+    const mode = normalizeQueryMode(request.mode, hasVector, hasText);
+    if (mode === "vector" && !hasVector) {
+      throw new ValidationError("vector is required");
+    }
+    if (mode === "text" && !hasText) {
+      throw new ValidationError("text is required");
+    }
+    if (mode === "hybrid" && (!hasVector || !hasText)) {
+      throw new ValidationError("vector and text are required for hybrid");
+    }
+
+    const fusion = normalizeFusionMode(request.fusion);
+    const alpha = request.alpha !== undefined ? normalizeAlpha(request.alpha) : undefined;
+
     const body: Record<string, unknown> = {
-      vector,
-      top_k: options.topK ?? 10,
-      include_vectors: options.includeVectors ?? false,
+      top_k: request.topK ?? 10,
+      include_vectors: request.includeVectors ?? false,
+      mode,
     };
-    if (options.distanceMetric) {
-      body.distance_metric = options.distanceMetric;
+
+    if (request.vector !== undefined) {
+      body.vector = request.vector;
     }
-    if (options.filters) {
-      body.filters = options.filters;
+    if (text !== undefined) {
+      body.text = text;
     }
-    if (options.efSearch !== undefined) {
-      body.ef_search = options.efSearch;
+    if (request.distanceMetric) {
+      body.distance_metric = request.distanceMetric;
     }
-    if (options.nprobe !== undefined) {
-      body.nprobe = options.nprobe;
+    if (request.filters) {
+      body.filters = request.filters;
+    }
+    if (request.efSearch !== undefined) {
+      body.ef_search = request.efSearch;
+    }
+    if (request.nprobe !== undefined) {
+      body.nprobe = request.nprobe;
+    }
+    if (alpha !== undefined) {
+      body.alpha = alpha;
+    }
+    if (fusion !== undefined) {
+      body.fusion = fusion;
+    }
+    if (request.rrfK !== undefined) {
+      body.rrf_k = request.rrfK;
     }
 
     const data = await this.request<QueryResponse | VectorResult[]>(
