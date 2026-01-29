@@ -354,6 +354,12 @@ export class TidepoolClient {
     if (data && Array.isArray(data.results)) {
       return normalizeVectorResults(data.results);
     }
+    if (data && typeof data === "object") {
+      const maybeVectors = (data as unknown as Record<string, unknown>).vectors;
+      if (Array.isArray(maybeVectors)) {
+        return normalizeVectorResults(maybeVectors as VectorResult[]);
+      }
+    }
     throw new TidepoolError("Unexpected query response shape");
   }
 
