@@ -3,6 +3,17 @@
   "version": "0.1.0",
   "description": "TypeScript client library for Tidepool vector database services.",
   "license": "MIT",
+  "author": "Milan Nair",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/milannair/tidepool-clients.git",
+    "directory": "tidepool-typescript"
+  },
+  "homepage": "https://github.com/milannair/tidepool-clients/tree/main/tidepool-typescript",
+  "bugs": {
+    "url": "https://github.com/milannair/tidepool-clients/issues"
+  },
+  "keywords": ["vector", "database", "search", "embeddings", "tidepool", "similarity"],
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
